@@ -20,15 +20,20 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv('.env')
 
-# Initialize OpenAI client (NEW API v1.0+)
+# Initialize OpenAI client with CUSTOM API URL
 def get_openai_client():
-    api_key = os.environ.get('OPENAI_API_KEY')
-    if not api_key:
-        api_key = st.text_input("Enter OPENAI_API_KEY API key", type="password")
+    api_key = os.environ.get('OPENAI_API_KEY', 'dummy-key')  # Custom API may not need real key
+    if not api_key or api_key == 'dummy-key':
+        api_key = st.text_input("Enter API key (or leave as dummy-key)", value="dummy-key", type="password")
         if api_key:
             set_key('.env', 'OPENAI_API_KEY', api_key)
             os.environ['OPENAI_API_KEY'] = api_key
-    return OpenAI(api_key=api_key) if api_key else None
+    
+    # Use CUSTOM Claude API endpoint
+    return OpenAI(
+        api_key=api_key,
+        base_url="https://claude-opus-chatbot.onrender.com/v1"  # Custom API URL
+    )
 
 client = get_openai_client()
 
@@ -205,9 +210,9 @@ if selected_persona and selected_persona != "None":
 
 # Define the function to get the AI's response
 def get_ai_response(text_input):
-    """Get AI response using chat models (NEW API)"""
+    """Get AI response using chat models (CUSTOM API)"""
     if not client:
-        return "Error: OpenAI API key not configured"
+        return "Error: API client not configured"
     
     try:
         messages = [
@@ -231,9 +236,9 @@ def get_ai_response(text_input):
         return f"Error: {str(e)}"
 
 def add_text(text_input):
-    """Get AI response using completion models (NEW API)"""
+    """Get AI response using completion models (CUSTOM API)"""
     if not client:
-        return "Error: OpenAI API key not configured"
+        return "Error: API client not configured"
     
     try:
         response = client.completions.create(
