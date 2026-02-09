@@ -1,18 +1,11 @@
-transformers
-streamlit-chat
-huggingface-hub
-torch
-tqdm
-streamlit-extras
-hugchat
-directory_structure
-alive_progress
-fade
-python-dotenv
-pathlib
-openai
-gradio
-ipywidgets
-inquirer
-prettytable
-jira
+# Core Dependencies
+streamlit>=1.30.0
+python-dotenv>=1.0.0
+pandas>=2.0.0
+
+# OpenAI API (v1.0+)
+openai>=1.10.0
+
+# Optional: For enhanced features
+# streamlit-chat>=0.1.0  # Uncomment if needed
+# plotly>=5.18.0         # Uncomment for charts
