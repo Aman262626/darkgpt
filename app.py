@@ -1,556 +1,385 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-DarkGPT v3.0 - Modern AI Chat Interface
-Secure, Production-Ready, Modular Architecture
-"""
 
 import os
-import sys
-import json
 import time
 import logging
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple
-from datetime import datetime, timedelta
-from collections import defaultdict
+from datetime import datetime
+from typing import List, Dict, Tuple
 
 import streamlit as st
 import pandas as pd
-from dotenv import load_dotenv
-from openai import OpenAI, OpenAIError
-import hashlib
+from dotenv import load_dotenv, set_key
+from openai import OpenAI
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('darkgpt.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # Load environment variables
-load_dotenv()
+load_dotenv('.env')
 
-# Constants
-MAX_HISTORY_MESSAGES = 50
-MAX_MESSAGE_LENGTH = 4000
-MAX_TOKENS = 4096
-REQUEST_TIMEOUT = 60
-MAX_RETRIES = 3
-RETRY_DELAY = 2
-
-# Rate limiting: max requests per user per minute
-RATE_LIMIT_REQUESTS = 10
-RATE_LIMIT_WINDOW = 60  # seconds
-
-
-class SecurityManager:
-    """Handle input validation and security checks"""
-    
-    @staticmethod
-    def sanitize_input(text: str) -> str:
-        """Remove potentially harmful characters"""
-        if not text:
-            return ""
-        # Remove null bytes and control characters
-        text = text.replace('\x00', '').strip()
-        # Limit length
-        if len(text) > MAX_MESSAGE_LENGTH:
-            text = text[:MAX_MESSAGE_LENGTH]
-        return text
-    
-    @staticmethod
-    def validate_api_key(api_key: str) -> bool:
-        """Validate OpenAI API key format"""
-        if not api_key:
-            return False
-        # OpenAI keys start with 'sk-' and are typically 51 chars
-        return api_key.startswith('sk-') and len(api_key) >= 40
-    
-    @staticmethod
-    def get_user_id() -> str:
-        """Generate anonymous user ID for rate limiting"""
-        # Use session state or generate from timestamp
-        if 'user_id' not in st.session_state:
-            st.session_state.user_id = hashlib.md5(
-                str(time.time()).encode()
-            ).hexdigest()[:16]
-        return st.session_state.user_id
-
-
-class RateLimiter:
-    """Simple rate limiting to prevent API abuse"""
-    
-    def __init__(self):
-        self.requests = defaultdict(list)
-    
-    def check_rate_limit(self, user_id: str) -> Tuple[bool, int]:
-        """Check if user exceeded rate limit"""
-        now = time.time()
-        # Clean old requests
-        self.requests[user_id] = [
-            req_time for req_time in self.requests[user_id]
-            if now - req_time < RATE_LIMIT_WINDOW
-        ]
-        
-        if len(self.requests[user_id]) >= RATE_LIMIT_REQUESTS:
-            # Calculate wait time
-            oldest_request = min(self.requests[user_id])
-            wait_time = int(RATE_LIMIT_WINDOW - (now - oldest_request))
-            return False, wait_time
-        
-        self.requests[user_id].append(now)
-        return True, 0
-
-
-class OpenAIClient:
-    """Modern OpenAI API client with error handling and retries"""
-    
-    def __init__(self, api_key: str):
-        self.client = OpenAI(api_key=api_key)
-    
-    def chat_completion(
-        self,
-        messages: List[Dict[str, str]],
-        model: str = "gpt-3.5-turbo",
-        temperature: float = 0.7,
-        max_tokens: int = MAX_TOKENS
-    ) -> Optional[str]:
-        """Send chat completion request with retries"""
-        for attempt in range(MAX_RETRIES):
-            try:
-                response = self.client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    timeout=REQUEST_TIMEOUT
-                )
-                return response.choices[0].message.content
-            
-            except OpenAIError as e:
-                logger.error(f"OpenAI API error (attempt {attempt + 1}): {str(e)}")
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY * (attempt + 1))  # Exponential backoff
-                else:
-                    return None
-            
-            except Exception as e:
-                logger.error(f"Unexpected error: {str(e)}")
-                return None
-        
-        return None
-
-
-class PersonaManager:
-    """Manage persona files and prompts"""
-    
-    def __init__(self, personas_dir: str = "personas"):
-        self.personas_dir = Path(personas_dir)
-        self.personas_dir.mkdir(exist_ok=True)
-    
-    def get_persona_files(self) -> List[str]:
-        """Get list of available personas"""
-        return sorted([
-            f.stem for f in self.personas_dir.glob("*.md")
-        ])
-    
-    def load_persona(self, persona_name: str) -> Optional[str]:
-        """Load persona prompt from file"""
-        if not persona_name:
-            return None
-        
-        file_path = self.personas_dir / f"{persona_name}.md"
-        if not file_path.exists():
-            return None
-        
-        try:
-            return file_path.read_text(encoding='utf-8')
-        except Exception as e:
-            logger.error(f"Error loading persona {persona_name}: {str(e)}")
-            return None
-    
-    def save_persona(self, persona_name: str, prompt: str) -> bool:
-        """Save persona prompt to file"""
-        if not persona_name or not prompt:
-            return False
-        
-        # Sanitize filename
-        safe_name = "".join(c for c in persona_name if c.isalnum() or c in (' ', '_', '-')).strip()
-        if not safe_name:
-            return False
-        
-        file_path = self.personas_dir / f"{safe_name}.md"
-        try:
-            file_path.write_text(prompt, encoding='utf-8')
-            return True
-        except Exception as e:
-            logger.error(f"Error saving persona {safe_name}: {str(e)}")
-            return False
-    
-    def delete_persona(self, persona_name: str) -> bool:
-        """Delete persona file"""
-        file_path = self.personas_dir / f"{persona_name}.md"
-        if not file_path.exists():
-            return False
-        
-        try:
-            file_path.unlink()
-            return True
-        except Exception as e:
-            logger.error(f"Error deleting persona {persona_name}: {str(e)}")
-            return False
-
-
-class ChatManager:
-    """Manage chat history and messages"""
-    
-    @staticmethod
-    def initialize_session():
-        """Initialize session state variables"""
-        if 'chat_history' not in st.session_state:
-            st.session_state.chat_history = []
-        if 'message_count' not in st.session_state:
-            st.session_state.message_count = 0
-    
-    @staticmethod
-    def add_message(role: str, content: str, metadata: Optional[Dict] = None):
-        """Add message to chat history"""
-        message = {
-            'role': role,
-            'content': content,
-            'timestamp': datetime.now().isoformat(),
-            'metadata': metadata or {}
-        }
-        st.session_state.chat_history.append(message)
-        st.session_state.message_count += 1
-        
-        # Limit history size
-        if len(st.session_state.chat_history) > MAX_HISTORY_MESSAGES:
-            st.session_state.chat_history = st.session_state.chat_history[-MAX_HISTORY_MESSAGES:]
-    
-    @staticmethod
-    def get_messages_for_api() -> List[Dict[str, str]]:
-        """Get formatted messages for OpenAI API"""
-        return [
-            {'role': msg['role'], 'content': msg['content']}
-            for msg in st.session_state.chat_history
-            if msg['role'] in ('user', 'assistant', 'system')
-        ]
-    
-    @staticmethod
-    def clear_history():
-        """Clear chat history"""
-        st.session_state.chat_history = []
-        st.session_state.message_count = 0
-    
-    @staticmethod
-    def export_history() -> str:
-        """Export chat history as text"""
-        lines = []
-        for msg in st.session_state.chat_history:
-            timestamp = msg.get('timestamp', '')
-            role = msg.get('role', '').upper()
-            content = msg.get('content', '')
-            lines.append(f"[{timestamp}] {role}: {content}\n")
-        return "\n".join(lines)
-
-
-def setup_page():
-    """Configure Streamlit page"""
-    st.set_page_config(
-        page_title="DarkGPT v3.0",
-        page_icon="🌑",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-    
-    # Custom CSS
-    st.markdown("""
-        <style>
-        .user-message {
-            background-color: #1e1e2e;
-            padding: 15px;
-            border-radius: 10px;
-            margin: 10px 0;
-            border-left: 3px solid #e90ce4;
-        }
-        .assistant-message {
-            background-color: #16213e;
-            padding: 15px;
-            border-radius: 10px;
-            margin: 10px 0;
-            border-left: 3px solid #0ab5e0;
-        }
-        .system-message {
-            background-color: #1a1a2e;
-            padding: 10px;
-            border-radius: 8px;
-            margin: 5px 0;
-            font-size: 0.9em;
-            color: #888;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-
-def render_sidebar(persona_manager: PersonaManager) -> Dict:
-    """Render sidebar with settings and persona management"""
-    st.sidebar.title("🌑 DarkGPT v3.0")
-    st.sidebar.markdown("**Modern AI Chat Interface**")
-    st.sidebar.markdown("---")
-    
-    # API Key Configuration
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key or not SecurityManager.validate_api_key(api_key):
-        st.sidebar.warning("⚠️ OpenAI API key not configured")
-        api_key = st.sidebar.text_input(
-            "Enter OpenAI API Key",
-            type="password",
-            help="Get your API key from https://platform.openai.com/api-keys"
-        )
+# Initialize OpenAI client
+def get_openai_client():
+    api_key = os.environ.get('OPENAI_API_KEY')
+    if not api_key:
+        api_key = st.text_input("Enter OPENAI_API_KEY API key", type="password")
         if api_key:
+            set_key('.env', 'OPENAI_API_KEY', api_key)
             os.environ['OPENAI_API_KEY'] = api_key
-    
-    # Model Selection
-    model = st.sidebar.selectbox(
-        "🤖 Model",
-        options=[
-            'gpt-3.5-turbo',
-            'gpt-3.5-turbo-16k',
-            'gpt-4',
-            'gpt-4-turbo-preview'
-        ],
-        index=0
-    )
-    
-    # Parameters
-    temperature = st.sidebar.slider(
-        "🌡️ Temperature",
-        min_value=0.0,
-        max_value=2.0,
-        value=0.7,
-        step=0.1,
-        help="Higher values = more creative, Lower values = more focused"
-    )
-    
-    max_tokens = st.sidebar.slider(
-        "📏 Max Tokens",
-        min_value=100,
-        max_value=4096,
-        value=2048,
-        step=100
-    )
-    
-    st.sidebar.markdown("---")
-    
-    # Persona Management
-    st.sidebar.subheader("👤 Persona")
-    personas = persona_manager.get_persona_files()
-    selected_persona = st.sidebar.selectbox(
-        "Select Persona",
-        options=["None"] + personas,
-        index=0
-    )
-    
-    persona_prompt = None
-    if selected_persona != "None":
-        persona_prompt = persona_manager.load_persona(selected_persona)
-        if persona_prompt:
-            with st.sidebar.expander("📝 Edit Persona", expanded=False):
-                edited_prompt = st.text_area(
-                    "Persona Prompt",
-                    value=persona_prompt,
-                    height=150
-                )
-                if st.button("💾 Save Changes"):
-                    if persona_manager.save_persona(selected_persona, edited_prompt):
-                        st.success("✅ Persona updated!")
-                        st.rerun()
-                
-                if st.button("🗑️ Delete Persona"):
-                    if persona_manager.delete_persona(selected_persona):
-                        st.success("✅ Persona deleted!")
-                        st.rerun()
-    
-    # Add New Persona
-    with st.sidebar.expander("➕ Create New Persona", expanded=False):
-        new_name = st.text_input("Persona Name")
-        new_prompt = st.text_area("Persona Prompt", height=100)
-        if st.button("💾 Create Persona"):
-            if new_name and new_prompt:
-                if persona_manager.save_persona(new_name, new_prompt):
-                    st.success(f"✅ Persona '{new_name}' created!")
-                    st.rerun()
-            else:
-                st.error("❌ Name and prompt required")
-    
-    st.sidebar.markdown("---")
-    
-    # Actions
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        if st.button("🗑️ Clear Chat", use_container_width=True):
-            ChatManager.clear_history()
-            st.rerun()
-    
-    with col2:
-        if st.button("💾 Export", use_container_width=True):
-            export_text = ChatManager.export_history()
-            st.download_button(
-                label="📥 Download",
-                data=export_text,
-                file_name=f"darkgpt_chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
-    
-    # Stats
-    st.sidebar.markdown("---")
-    st.sidebar.metric("💬 Messages", st.session_state.get('message_count', 0))
-    st.sidebar.metric("👤 Personas", len(personas))
-    
-    return {
-        'api_key': api_key,
-        'model': model,
-        'temperature': temperature,
-        'max_tokens': max_tokens,
-        'persona_prompt': persona_prompt,
-        'selected_persona': selected_persona
-    }
+    return OpenAI(api_key=api_key) if api_key else None
 
+client = get_openai_client()
 
-def render_chat_message(message: Dict):
-    """Render a single chat message"""
-    role = message.get('role', '')
-    content = message.get('content', '')
-    
-    if role == 'user':
-        st.markdown(
-            f'<div class="user-message">👤 <b>You:</b><br>{content}</div>',
-            unsafe_allow_html=True
-        )
-    elif role == 'assistant':
-        st.markdown(
-            f'<div class="assistant-message">🤖 <b>DarkGPT:</b><br>{content}</div>',
-            unsafe_allow_html=True
-        )
-    elif role == 'system':
-        st.markdown(
-            f'<div class="system-message">ℹ️ {content}</div>',
-            unsafe_allow_html=True
-        )
+# Page configuration
+st.set_page_config(
+    page_title="𝚑𝚊𝚌𝚔🅶🅿🆃",
+    page_icon="https://raw.githubusercontent.com/NoDataFound/hackGPT/main/res/hackgpt_fav.png",
+    layout="wide"
+)
 
+# Feature 14: Custom CSS
+CSS = """
+<style>
+img {
+    box-shadow: 0px 10px 15px rgba(0, 0, 0, 0.2);
+}
+.user {
+    display: inline-block;
+    padding: 8px;
+    border-radius: 10px;
+    margin-bottom: 1px;
+    border: 1px solid #e90ce4;
+    width: 100%;
+    height: 100%;
+    overflow-y: scroll;
+}
+.ai {
+    display: inline-block;
+    padding: 10px;
+    border-radius: 10px;
+    margin-bottom: 1px;
+    border: 1px solid #0ab5e0;
+    width: 100%;
+    overflow-x: scroll;
+    height: 100%;
+    overflow-y: scroll;
+}
+.model {
+    display: inline-block;
+    background-color: #f0e0ff;
+    padding: 1px;
+    border-radius: 5px;
+    margin-bottom: 5px;
+    width: 100%;
+    height: 100%;
+    overflow-y: scroll;
+}
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
 
-def main():
-    """Main application entry point"""
-    setup_page()
-    
-    # Initialize managers
-    persona_manager = PersonaManager()
-    rate_limiter = RateLimiter()
-    ChatManager.initialize_session()
-    
-    # Render sidebar and get settings
-    settings = render_sidebar(persona_manager)
-    
-    # Main content area
-    st.title("🌑 DarkGPT v3.0")
-    st.markdown("**Secure, Modern AI Chat Interface**")
-    
-    # Display chat history
-    chat_container = st.container()
-    with chat_container:
-        for message in st.session_state.chat_history:
-            render_chat_message(message)
-    
-    # Input area
-    user_input = st.chat_input(
-        "Type your message here...",
-        key="user_input"
-    )
-    
-    if user_input:
-        # Security checks
-        user_input = SecurityManager.sanitize_input(user_input)
-        if not user_input:
-            st.error("❌ Invalid input")
-            return
-        
-        # Rate limiting
-        user_id = SecurityManager.get_user_id()
-        allowed, wait_time = rate_limiter.check_rate_limit(user_id)
-        if not allowed:
-            st.warning(f"⏱️ Rate limit exceeded. Please wait {wait_time} seconds.")
-            return
-        
-        # Check API key
-        api_key = settings.get('api_key')
-        if not api_key or not SecurityManager.validate_api_key(api_key):
-            st.error("❌ Please configure a valid OpenAI API key in the sidebar")
-            return
-        
-        # Add user message
-        ChatManager.add_message('user', user_input)
-        
-        # Prepare messages for API
-        messages = []
-        
-        # Add persona as system message if selected
-        persona_prompt = settings.get('persona_prompt')
-        if persona_prompt:
-            messages.append({
-                'role': 'system',
-                'content': persona_prompt
-            })
-        
-        # Add conversation history
-        messages.extend(ChatManager.get_messages_for_api())
-        
-        # Show processing indicator
-        with st.spinner("🤔 Thinking..."):
-            try:
-                # Create OpenAI client and get response
-                client = OpenAIClient(api_key)
-                response = client.chat_completion(
-                    messages=messages,
-                    model=settings.get('model', 'gpt-3.5-turbo'),
-                    temperature=settings.get('temperature', 0.7),
-                    max_tokens=settings.get('max_tokens', 2048)
-                )
-                
-                if response:
-                    # Add assistant response
-                    ChatManager.add_message(
-                        'assistant',
-                        response,
-                        metadata={
-                            'model': settings.get('model'),
-                            'persona': settings.get('selected_persona')
-                        }
-                    )
-                    st.rerun()
-                else:
-                    st.error("❌ Failed to get response from API. Please try again.")
-                    ChatManager.add_message(
-                        'system',
-                        'Error: Failed to get response from API'
-                    )
+# Sidebar branding
+st.sidebar.image('https://raw.githubusercontent.com/NoDataFound/hackGPT/main/res/hackGPT_logo.png', width=300)
+github_logo = "https://raw.githubusercontent.com/NoDataFound/hackGPT/main/res/github.png"
+hackGPT_repo = "https://github.com/NoDataFound/hackGPT"
+st.sidebar.markdown(f"[![GitHub]({github_logo})]({hackGPT_repo} 'hackGPT repo')")
+
+# Feature 7: Local Persona System
+def get_persona_files():
+    """Get list of local persona files"""
+    if not os.path.exists("personas"):
+        os.makedirs("personas")
+    return [f.split(".")[0] for f in os.listdir("personas") if f.endswith(".md")]
+
+persona_files = get_persona_files()
+selected_persona = st.sidebar.selectbox("👤 𝖲𝖾𝗅𝖾𝖼𝗍 𝖫𝗈𝖼𝖺𝗅 𝖯𝖾𝗋𝗌𝗈𝗇𝖺", ["None"] + persona_files)
+
+# OpenAI Model Configuration
+MODEL = st.sidebar.selectbox(
+    label='Model',
+    options=[
+        'gpt-3.5-turbo',
+        'gpt-3.5-turbo-0301',
+        'gpt-4',
+        'gpt-4-0314',
+        'text-davinci-003',
+        'text-davinci-002',
+        'text-davinci-edit-001',
+        'code-davinci-edit-001'
+    ]
+)
+
+default_temperature = 1.0
+temperature = st.sidebar.slider(
+    "𝗧𝗲𝗺𝗽𝗲𝗿𝗮𝘁𝘂𝗿𝗲 | 𝗖𝗿𝗲𝗮𝘁𝗶𝘃𝗲 <𝟬.𝟱",
+    min_value=0.0,
+    max_value=1.0,
+    step=0.1,
+    value=default_temperature
+)
+max_tokens = st.sidebar.slider("𝗠𝗔𝗫 𝗢𝗨𝗧𝗣𝗨𝗧 𝗧𝗢𝗞𝗘𝗡𝗦", 10, 4000, 2300)
+
+# Feature 8: Remote Persona Import
+url = "https://raw.githubusercontent.com/f/awesome-chatgpt-prompts/main/prompts.csv"
+try:
+    data = pd.read_csv(url)
+    new_row = pd.DataFrame({"act": [" "], "prompt": [""]})
+    data = pd.concat([data, new_row], ignore_index=True)
+except Exception as e:
+    logger.error(f"Failed to load remote personas: {e}")
+    data = pd.DataFrame({"act": [" "], "prompt": [""]})
+
+# Feature 9: Jailbreak Prompts
+jailbreaks_url = "https://raw.githubusercontent.com/NoDataFound/hackGPT/main/jailbreaks.csv"
+try:
+    jailbreakdata = pd.read_csv(jailbreaks_url)
+    jailbreaknew_row = pd.DataFrame({"hacker": [" "], "text": [""]})
+    jailbreakdata = pd.concat([jailbreakdata, jailbreaknew_row], ignore_index=True)
+except Exception as e:
+    logger.error(f"Failed to load jailbreaks: {e}")
+    jailbreakdata = pd.DataFrame({"hacker": [" "], "text": [""]})
+
+# Feature 10: Persona Manager
+expand_section = st.sidebar.expander("👤 Manage Personas", expanded=False)
+with expand_section:
+    if selected_persona and selected_persona != "None":
+        persona_path = os.path.join("personas", f"{selected_persona}.md")
+        if os.path.exists(persona_path):
+            with open(persona_path, "r") as f:
+                persona_text = f.read()
             
-            except Exception as e:
-                logger.error(f"Error in main loop: {str(e)}")
-                st.error(f"❌ An error occurred: {str(e)}")
-                ChatManager.add_message('system', f'Error: {str(e)}')
+            new_persona_name = st.text_input("Persona Name:", value=selected_persona)
+            new_persona_prompt = st.text_area("Persona Prompt:", value=persona_text, height=100)
+            
+            if new_persona_name != selected_persona or new_persona_prompt != persona_text:
+                with open(os.path.join("personas", f"{new_persona_name}.md"), "w") as f:
+                    f.write(new_persona_prompt)
+                if new_persona_name != selected_persona:
+                    os.remove(persona_path)
+                    persona_files.remove(selected_persona)
+                    persona_files.append(new_persona_name)
+                    selected_persona = new_persona_name
+            
+            if st.button("➖ Delete Persona"):
+                os.remove(persona_path)
+                persona_files.remove(selected_persona)
+                selected_persona = "None"
+                st.warning("Persona Deleted")
 
+# Import Remote Persona
+expand_section = st.sidebar.expander("🥷 Import Remote Persona", expanded=False)
+with expand_section:
+    selected_act = st.selectbox('', data['act'])
+    show_remote_prompts = st.checkbox("Show remote prompt options")
+    if selected_act and selected_act.strip():
+        selected_prompt = data.loc[data['act'] == selected_act, 'prompt'].values[0]
+        confirm = st.button("Save Selected Persona")
+        if confirm:
+            if not os.path.exists("personas"):
+                os.mkdir("personas")
+            with open(os.path.join("personas", f"{selected_act}_remote.md"), "w") as f:
+                f.write(selected_prompt)
+            st.success(f"Persona '{selected_act}' saved!")
 
-if __name__ == '__main__':
+# Jailbreaks Section
+expand_section = st.sidebar.expander("🏴‍☠️ Jailbreaks", expanded=False)
+with expand_section:
+    selected_hacker = st.selectbox('', jailbreakdata['hacker'])
+    show_hack_prompts = st.checkbox("Show jailbreak options")
+    if selected_hacker and selected_hacker.strip():
+        selected_jailbreak_prompt = jailbreakdata.loc[jailbreakdata['hacker'] == selected_hacker, 'text'].values[0]
+        confirm = st.button("Save Selected Jailbreak")
+        if confirm:
+            if not os.path.exists("personas"):
+                os.mkdir("personas")
+            with open(os.path.join("personas", f"{selected_hacker}_jailbreak.md"), "w") as f:
+                f.write(selected_jailbreak_prompt)
+            st.success(f"Jailbreak '{selected_hacker}' saved!")
+
+# Add New Persona
+expand_section = st.sidebar.expander("➕ Add new Persona", expanded=False)
+with expand_section:
+    st.subheader("➕ Add new Persona")
+    st.text("Press enter to update/save")
+    persona_files = get_persona_files()
+    new_persona_name = st.text_input("Persona Name:")
+    if new_persona_name in persona_files:
+        st.error("This persona name already exists. Please choose a different name.")
+    else:
+        new_persona_prompt = st.text_area("Persona Prompt:", height=100)
+        if new_persona_name and new_persona_prompt:
+            with open(os.path.join("personas", f"{new_persona_name}.md"), "w") as f:
+                f.write(new_persona_prompt)
+            persona_files.append(new_persona_name)
+            selected_persona = new_persona_name
+            st.success(f"Persona '{new_persona_name}' created!")
+
+# Display prompt options
+if show_hack_prompts:
+    st.write(jailbreakdata[['hacker', 'text']].style.hide(axis="index").set_properties(
+        subset='text',
+        **{'max-width': '100%', 'white-space': 'pre-wrap'}
+    ))
+elif show_remote_prompts:
+    st.write(data[['act', 'prompt']].style.hide(axis="index").set_properties(
+        subset='prompt',
+        **{'max-width': '100%', 'white-space': 'pre-wrap'}
+    ))
+
+# Load persona text
+persona_text = ""
+if selected_persona and selected_persona != "None":
+    persona_path = os.path.join("personas", f"{selected_persona}.md")
+    if os.path.exists(persona_path):
+        with open(persona_path, "r") as f:
+            persona_text = f.read()
+
+# Feature 11: File Upload
+file = st.sidebar.file_uploader("📁 Upload Text File", type=["txt"])
+
+# AI Response Functions
+def get_ai_response(text_input: str, persona: str = "") -> str:
+    """Get AI response using chat models"""
+    if not client:
+        return "Error: OpenAI API key not configured"
+    
     try:
-        main()
+        messages = [
+            {'role': 'system', 'content': 'You are a helpful assistant.'},
+            {'role': 'user', 'content': text_input + persona}
+        ]
+        
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0.6,
+            stop=[" Human:", " AI:"]
+        )
+        return response.choices[0].message.content
     except Exception as e:
-        logger.critical(f"Critical error: {str(e)}", exc_info=True)
-        st.error(f"❌ Critical error: {str(e)}")
-        st.stop()
+        logger.error(f"Error in get_ai_response: {e}")
+        return f"Error: {str(e)}"
+
+def add_text(text_input: str, persona: str = "") -> str:
+    """Get AI response using completion models"""
+    if not client:
+        return "Error: OpenAI API key not configured"
+    
+    try:
+        response = client.completions.create(
+            model=MODEL,
+            prompt=str(persona) + text_input,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0,
+            stop=["\"\"\""]
+        )
+        return response.choices[0].text
+    except Exception as e:
+        logger.error(f"Error in add_text: {e}")
+        return f"Error: {str(e)}"
+
+# Initialize session state
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# Feature 13: Metrics Display
+try:
+    if len(st.session_state.chat_history) == 0:
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("Persona", selected_persona, selected_persona)
+        col2.metric("Persona Count", len(persona_files), len(persona_files))
+        col3.metric("Jailbreaks", len(jailbreakdata), len(jailbreakdata))
+        col4.metric("Model", MODEL)
+        col5.metric("Model Count", len(MODEL), len(MODEL))
+    else:
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        col1.metric("Persona", selected_persona, selected_persona)
+        col2.metric("Persona Count", len(persona_files), len(persona_files))
+        col3.metric("Jailbreaks", len(jailbreakdata), len(jailbreakdata))
+        col4.metric("Model", MODEL)
+        col5.metric("Model Count", len(MODEL), len(MODEL))
+        col6.metric("Messages", len(st.session_state.chat_history), len(st.session_state.chat_history))
+except Exception as e:
+    logger.error(f"Error displaying metrics: {e}")
+
+# Display chat history
+def display_chat_history():
+    """Display chat history with custom styling"""
+    for i, (role, text) in reversed(list(enumerate(st.session_state.chat_history))):
+        alignment = 'left' if role == 'user' else 'left'
+        
+        if role == 'user':
+            margin = 'margin-bottom: 1px;'
+        else:
+            margin = 'margin-top: 8px;'
+        
+        col1, col2 = st.columns([2, 8])
+        with col1:
+            if role == 'user':
+                st.markdown(f'<div style="{margin}" class="{role}">{text}</div>', unsafe_allow_html=True)
+            if role == 'model':
+                st.markdown(f'<div style="text-align: left; color: green;" class="{role}">{text}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('')
+        with col2:
+            if role == 'ai':
+                st.markdown(f'<div style="text-align: {alignment}; {margin}" class="{role}">{text}</div>', unsafe_allow_html=True)
+            if role == 'persona':
+                st.markdown(f'<div style="text-align: right; color: orange;" class="{role}">{text}</div>', unsafe_allow_html=True)
+
+# Main chat interface
+st.write("")
+text_input = st.text_input(
+    "",
+    value="",
+    key="text_input",
+    placeholder="Type your message here...",
+    help="Press Enter to send your message."
+)
+
+# Process user input
+if text_input:
+    if MODEL in ['gpt-3.5-turbo', 'gpt-4', 'gpt-3.5-turbo-0301', 'gpt-4-0314']:
+        ai_response = get_ai_response(text_input, persona_text)
+    else:
+        ai_response = add_text(text_input, persona_text)
+    
+    st.session_state.chat_history.append(('ai', f"{ai_response}"))
+    st.session_state.chat_history.append(('persona', f"{selected_persona}"))
+    st.session_state.chat_history.append(('user', f"You: {text_input}"))
+    st.session_state.chat_history.append(('model', f"{MODEL}"))
+
+# Process file upload
+if file is not None:
+    text = file.read().decode("utf-8")
+    st.write(f"Input: {text}")
+    
+    if MODEL in ['gpt-3.5-turbo', 'gpt-4', 'gpt-3.5-turbo-0301', 'gpt-4-0314']:
+        response = get_ai_response(text, persona_text)
+    else:
+        response = add_text(text, persona_text)
+    
+    st.write(f"Output: {response}")
+
+display_chat_history()
+
+# Feature 12: Chat History Download
+if st.button("Download Chat History"):
+    chat_history_text = "\n".join([text for _, text in st.session_state.chat_history])
+    st.download_button(
+        label="Download Chat History",
+        data=chat_history_text.encode(),
+        file_name="chat_history.txt",
+        mime="text/plain",
+    )
