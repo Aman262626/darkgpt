@@ -3,8 +3,8 @@ streamlit>=1.30.0
 python-dotenv>=1.0.0
 pandas>=2.0.0
 
-# OpenAI API (v1.0+)
-openai>=1.10.0
+# HTTP Requests for Custom API
+requests>=2.31.0
 
 # Optional: For enhanced features
 # streamlit-chat>=0.1.0  # Uncomment if needed
