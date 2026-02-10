@@ -7,8 +7,8 @@ from datetime import datetime
 
 import streamlit as st
 import pandas as pd
+import requests  # For direct API calls
 from dotenv import load_dotenv, set_key
-from openai import OpenAI
 
 # Configure logging
 logging.basicConfig(
@@ -20,22 +20,8 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv('.env')
 
-# Initialize OpenAI client with CUSTOM API URL
-def get_openai_client():
-    api_key = os.environ.get('OPENAI_API_KEY', 'dummy-key')  # Custom API may not need real key
-    if not api_key or api_key == 'dummy-key':
-        api_key = st.text_input("Enter API key (or leave as dummy-key)", value="dummy-key", type="password")
-        if api_key:
-            set_key('.env', 'OPENAI_API_KEY', api_key)
-            os.environ['OPENAI_API_KEY'] = api_key
-    
-    # Use CUSTOM Claude API endpoint
-    return OpenAI(
-        api_key=api_key,
-        base_url="https://claude-opus-chatbot.onrender.com/v1"  # Custom API URL
-    )
-
-client = get_openai_client()
+# Custom API Configuration
+CUSTOM_API_URL = "https://claude-opus-chatbot.onrender.com/chat"
 
 # Page configuration
 st.set_page_config(
@@ -69,18 +55,14 @@ def get_persona_files():
 persona_files = get_persona_files()
 selected_persona = st.sidebar.selectbox("👤 𝖲𝖾𝗅𝖾𝖼𝗍 𝖫𝗈𝖼𝖺𝗅 𝖯𝖾𝗋𝗌𝗈𝗇𝖺", ["None"] + persona_files)
 
-# OpenAI setup
+# Model setup (for display only - API doesn't use this)
 MODEL = st.sidebar.selectbox(
     label='Model',
     options=[
+        'claude-opus',
         'gpt-3.5-turbo',
-        'gpt-3.5-turbo-0301',
         'gpt-4',
-        'gpt-4-0314',
-        'text-davinci-003',
-        'text-davinci-002',
-        'text-davinci-edit-001',
-        'code-davinci-edit-001'
+        'text-davinci-003'
     ]
 )
 
@@ -208,52 +190,37 @@ if selected_persona and selected_persona != "None":
         with open(persona_path, "r") as f:
             persona_text = f.read()
 
-# Define the function to get the AI's response
+# Define the function to get the AI's response using CUSTOM API
 def get_ai_response(text_input):
-    """Get AI response using chat models (CUSTOM API)"""
-    if not client:
-        return "Error: API client not configured"
-    
+    """Get AI response using custom Claude API"""
     try:
-        messages = [
-            {'role': 'system', 'content': 'You are a helpful assistant.'},
-            {'role': 'user', 'content': text_input + persona_text}
-        ]
+        # Combine persona with user input
+        final_message = text_input
+        if persona_text:
+            final_message = f"{persona_text}\n\nUser: {text_input}"
         
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            top_p=1,
-            frequency_penalty=0,
-            presence_penalty=0.6,
-            stop=[" Human:", " AI:"]
+        # Make POST request to custom API
+        response = requests.post(
+            CUSTOM_API_URL,
+            json={
+                "message": final_message,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            },
+            timeout=60
         )
-        return response.choices[0].message.content
+        
+        if response.status_code == 200:
+            result = response.json()
+            # Extract response - adjust based on actual API response format
+            if isinstance(result, dict):
+                return result.get('response', result.get('message', result.get('text', str(result))))
+            return str(result)
+        else:
+            return f"Error: API returned status {response.status_code}"
+    
     except Exception as e:
         logger.error(f"Error in get_ai_response: {e}")
-        return f"Error: {str(e)}"
-
-def add_text(text_input):
-    """Get AI response using completion models (CUSTOM API)"""
-    if not client:
-        return "Error: API client not configured"
-    
-    try:
-        response = client.completions.create(
-            model=MODEL,
-            prompt=str(persona_text) + text_input,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            top_p=1,
-            frequency_penalty=0,
-            presence_penalty=0,
-            stop=["\"\"\""]
-        )
-        return response.choices[0].text
-    except Exception as e:
-        logger.error(f"Error in add_text: {e}")
         return f"Error: {str(e)}"
 
 try:
@@ -278,7 +245,6 @@ try:
 except Exception as e:
     logger.error(f"Error displaying metrics: {e}")
 
-# st.sidebar.header("File Upload")
 file = st.sidebar.file_uploader("📁 Upload Text File", type=["txt"])
 
 user_css = """
@@ -366,33 +332,20 @@ text_input = st.text_input(
     help="Press Enter to send your message."
 )
 
-if MODEL in ['gpt-3.5-turbo', 'gpt-4', 'gpt-3.5-turbo-0301', 'gpt-4-0314']:
-    if text_input:
-        ai_response = get_ai_response(text_input)
-        st.session_state.chat_history.append(('ai', f"{ai_response}"))
-        st.session_state.chat_history.append(('persona', f"{selected_persona}"))
-        st.session_state.chat_history.append(('user', f"You: {text_input}"))
-        st.session_state.chat_history.append(('model', f"{MODEL}"))
-else:
-    if text_input:
-        ai_responses = add_text(text_input)
-        st.session_state.chat_history.append(('ai', f"{ai_responses}"))
-        st.session_state.chat_history.append(('persona', f"{selected_persona}"))
-        st.session_state.chat_history.append(('user', f"You: {text_input}"))
-        st.session_state.chat_history.append(('model', f"{MODEL}"))
+if text_input:
+    ai_response = get_ai_response(text_input)
+    st.session_state.chat_history.append(('ai', f"{ai_response}"))
+    st.session_state.chat_history.append(('persona', f"{selected_persona}"))
+    st.session_state.chat_history.append(('user', f"You: {text_input}"))
+    st.session_state.chat_history.append(('model', f"{MODEL}"))
 
 display_chat_history()
 
-# File upload processing (FIXED)
+# File upload processing
 if file is not None:
     text = file.read().decode("utf-8")
     st.write(f"Input: {text}")
-    
-    if MODEL in ['gpt-3.5-turbo', 'gpt-4', 'gpt-3.5-turbo-0301', 'gpt-4-0314']:
-        response = get_ai_response(text)
-    else:
-        response = add_text(text)
-    
+    response = get_ai_response(text)
     st.write(f"Output: {response}")
 
 if st.button("Download Chat History"):
